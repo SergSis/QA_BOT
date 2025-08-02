@@ -12,6 +12,11 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import LlamaCpp
 from langchain.prompts import PromptTemplate
 
+
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
 # --- 1. ПАРСИНГ И СОХРАНЕНИЕ ДАННЫХ ---
 # -----------------------------------------------------------------------------
 
@@ -110,6 +115,21 @@ def parse_and_save_data(urls: List[str], classes_to_parse: List[str], output_fil
 
             except requests.exceptions.RequestException as e:
                 print(f"Ошибка при получении данных с URL {url}: {e}")
+
+TELEGRAM_BOT_TOKEN = "8359159245:AAGF0BF1OISB0r3aPHaXMhBLyYows8stWkc"
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Загрузка базы данных и создание цепочки
+print("Инициализация бота...")
+csv_file = 'program_itmo_combined_full.csv'
+documents = load_data_from_csv(csv_file)
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+db = FAISS.load_local("faiss_index_itmo", embeddings, allow_dangerous_deserialization=True)
+retriever = db.as_retriever(search_kwargs={"k": 5})
 
 # --- 2. ЗАГРУЗКА И ОБРАБОТКА ДАННЫХ ДЛЯ LANGCHAIN ---
 # -----------------------------------------------------------------------------
@@ -241,3 +261,49 @@ if __name__ == "__main__":
             print(f"{i+1}. Заголовок: {title}")
             print(f"   Текст: {content_preview}...")
         print("-" * 50)
+
+
+
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",
+    retriever=retriever,
+    chain_type_kwargs={"prompt": PROMPT},
+    return_source_documents=False, # Для бота лучше не показывать источники
+    verbose=False
+)
+print("Бот готов к работе!")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает команду /start."""
+    await update.message.reply_text(
+        "Привет! Я бот-помощник для абитуриентов магистратуры ИТМО. "
+        "Я могу ответить на твои вопросы по программам"
+        "Спрашивай!"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает текстовые сообщения пользователя."""
+    query = update.message.text
+    # Отправляем "печатает..."
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        result = qa_chain({"query": query})
+        response = result['result']
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке запроса: {e}")
+        await update.message.reply_text("Извини, произошла ошибка. Попробуй ещё раз.")
+
+def main() -> None:
+    """Запускает бота."""
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
